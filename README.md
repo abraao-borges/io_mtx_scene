@@ -22,7 +22,7 @@ versions.
 4. Use the import tools provided by the addon.
 
 ### Materials and textures
-Not working properly. Still under development.
+Working properly. Lot of bug if import two models in the same scene.
 
 ### Project status
 The importer is already capable of loading:
@@ -32,6 +32,7 @@ The importer is already capable of loading:
 - UV data
 - textures
 - material assignments (presents visual glitches)
+- exporting (still cant export correctly. lot of errors to fix.)
 
 ### License
 See the repository license file for the licensing terms of this project
