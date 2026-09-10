@@ -13,6 +13,8 @@ from . tex import *
 
 # METHODS
 #############################################
+_IMPORT_INSTANCE_COUNTER = 0
+
 def _ensure_default_material_exists():
     if "_THUG_DEFAULT_MATERIAL_" in bpy.data.materials:
         return
@@ -49,9 +51,19 @@ def _thug_material_pass_props_color_updated(self, context):
     idblock.active_texture.factor_blue = b * 2
 
 def rename_imported_materials():
+    # Rename imported materials using their recorded checksum but avoid
+    # global collisions by appending a numeric suffix when multiple
+    # materials share the same base checksum name.
+    seen = {}
     for mat in bpy.data.materials:
         if "thug_mat_name_checksum" in mat and mat["thug_mat_name_checksum"] != "":
-            mat.name = mat["thug_mat_name_checksum"]
+            base_name = str(mat["thug_mat_name_checksum"])
+            count = seen.get(base_name, 0) + 1
+            seen[base_name] = count
+            if count == 1:
+                mat.name = base_name
+            else:
+                mat.name = f"{base_name}_{count}"
 
 
 def _sanitize_base_color(default_color):
@@ -233,6 +245,14 @@ def bind_image_texture_to_principled(mat, image, bsdf=None, image_name="THUG_Tex
     tex_node.location = (-300, -index * 180)
     tex_node.image = image
 
+    # Ensure image color space is set for viewport/material preview.
+    try:
+        if hasattr(image, 'colorspace_settings'):
+            # Default to sRGB for color/diffuse textures. Normal maps should be set to 'Non-Color' elsewhere.
+            image.colorspace_settings.name = 'sRGB'
+    except Exception:
+        pass
+
     # The SCN material records pass N -> UV set N. The mesh may not exist yet,
     # so create the node now; rebuild_thps_uv_nodes_for_object() will rebind it
     # to the actual layer after the mesh is constructed.
@@ -253,8 +273,10 @@ def bind_image_texture_to_principled(mat, image, bsdf=None, image_name="THUG_Tex
             mat.node_tree.links.remove(link)
         mat.node_tree.links.new(uv_output, vector)
 
-    if hasattr(tex_node, "extension"):
-        tex_node.extension = "REPEAT"
+    # Do not unconditionally set `extension` here; the pass addressing flags
+    # are parsed later in `read_materials()` and will apply the correct mode
+    # (Repeat vs Clamp). Setting a default here would overwrite file-specified
+    # addressing before pass properties are read.
 
     base_color_socket = bsdf.inputs.get("Base Color")
     if base_color_socket is not None and tex_node.outputs.get("Color"):
@@ -532,15 +554,20 @@ def read_materials(reader, printer, num_materials, directory, operator, output_f
     r = reader
     p = printer
 
+    global _IMPORT_INSTANCE_COUNTER
+    _IMPORT_INSTANCE_COUNTER += 1
+    instance_suffix = f"__imp{_IMPORT_INSTANCE_COUNTER}"
+
     for i in range(num_materials):
         p("material {}", i)
         mat_checksum = p("  material checksum: {}", hex(r.u32()))
         mat_name_checksum = p("  material name checksum: {}", hex(r.u32()))
-        # Match the original addon: name checksum is the stable material
-        # identity, so repeated material records reuse one datablock.
-        blender_mat = bpy.data.materials.get(str(mat_name_checksum))
+        # Create a per-import-unique material name so multiple imported
+        # characters do not collide on the same datablock names.
+        desired_mat_name = f"{mat_name_checksum}{instance_suffix}"
+        blender_mat = bpy.data.materials.get(desired_mat_name)
         if blender_mat is None:
-            blender_mat = bpy.data.materials.new(str(mat_checksum))
+            blender_mat = bpy.data.materials.new(name=f"{mat_checksum}{instance_suffix}")
         ps = blender_mat.thug_material_props
         blender_mat["thug_mat_name_checksum"] = mat_name_checksum
 
@@ -567,12 +594,12 @@ def read_materials(reader, printer, num_materials, directory, operator, output_f
         imported_pass_props = []
 
         for j in range(num_passes):
-            blender_tex = bpy.data.textures.new("{}/{}".format(mat_name_checksum, j), "IMAGE")
+            blender_tex = bpy.data.textures.new("{}/{}{}".format(mat_name_checksum, j, instance_suffix), "IMAGE")
             pps = blender_tex.thug_material_pass_props
             p("  pass #{}", j)
             tex_checksum = p("    pass texture checksum: {}", r.u32())
             actual_tex_checksum = hex(tex_checksum)
-            image_name = str(actual_tex_checksum)
+            image_name = f"{actual_tex_checksum}{instance_suffix}"
 
             # .tex import names images with the checksum.  Also accept an
             # explicit checksum property because Blender may append .001,
@@ -659,7 +686,20 @@ def read_materials(reader, printer, num_materials, directory, operator, output_f
                 for node in blender_mat.node_tree.nodes:
                     if node.type == "TEX_IMAGE" and getattr(node, "image", None) == image:
                         if hasattr(node, "extension"):
-                            node.extension = "EXTEND" if pps.u_addressing == "Clamp" else "REPEAT"
+                            # Map THPS addressing to Blender node extension values.
+                            # Use 'CLIP' for Clamp (clamped sampling) and 'REPEAT' for wrapping.
+                            node.extension = "CLIP" if (pps.u_addressing == "Clamp" or pps.v_addressing == "Clamp") else "REPEAT"
+                        # Also set the underlying Image clamp flags when available so
+                        # file-based clamping is respected in other contexts.
+                        try:
+                            img = getattr(node, 'image', None)
+                            if img is not None:
+                                if hasattr(img, 'use_clamp_x'):
+                                    img.use_clamp_x = (pps.u_addressing == "Clamp")
+                                if hasattr(img, 'use_clamp_y'):
+                                    img.use_clamp_y = (pps.v_addressing == "Clamp")
+                        except Exception:
+                            pass
                         break
 
             pps.envmap_multiples = p("    pass envmap uv tiling multiples: {}", r.read("2f"))

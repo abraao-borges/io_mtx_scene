@@ -219,10 +219,40 @@ def _make_decoded_image(tex_name, width, height, payload, compression):
         pixels = _decode_dxt1(width, height, payload)
     elif compression == "DXT5":
         pixels = _decode_dxt5(width, height, payload)
+    elif compression == "RGBA8":
+        # Uncompressed 8-bit RGBA payload. Handle possible per-row stride/padding.
+        w = int(width)
+        h = int(height)
+        arr = np.frombuffer(payload, dtype=np.uint8)
+        expected = w * h * 4
+        if h == 0 or w == 0:
+            raise ValueError("Invalid image dimensions")
+
+        if arr.size == expected:
+            img_arr = arr.reshape((h, w, 4))
+        else:
+            # Payload may include row stride/padding. Compute integer row stride.
+            row_stride = arr.size // h
+            if row_stride < w * 4:
+                raise ValueError(f"RGBA8 payload too small: got {arr.size}, expected >= {expected}")
+            rows = []
+            for r in range(h):
+                start = r * row_stride
+                row_bytes = arr[start:start + (w * 4)]
+                if row_bytes.size < w * 4:
+                    # pad row if necessary
+                    row_bytes = np.pad(row_bytes, (0, w * 4 - row_bytes.size), constant_values=0)
+                rows.append(row_bytes.reshape((w, 4)))
+            img_arr = np.stack(rows, axis=0)
+
+        # Maintain bottom-left origin (match DXT decoders). If textures look vertically
+        # flipped, change to img_arr = img_arr[::-1, :, :]
+        pixels = (img_arr.astype(np.float32) / 255.0).reshape(-1, 4)
     else:
         raise ValueError(f"Unsupported compressed texture format: {compression}")
 
     img = bpy.data.images.new(str(tex_name), int(width), int(height), alpha=True, float_buffer=False)
+    # foreach_set expects a flat sequence
     img.pixels.foreach_set(pixels.reshape(-1))
     img.update()
     img["thug_texture_checksum"] = f"0x{(int(str(tex_name), 0) & 0xFFFFFFFF):08X}"

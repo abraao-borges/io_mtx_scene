@@ -1092,4 +1092,29 @@ class THUGExportTools(bpy.types.Panel):
         box = self.layout.box().column(True)
         box.row().operator(THUGQuickExport.bl_idname, text=THUGQuickExport.bl_label, icon='PACKAGE')
             
+# Registration helpers for export operators
+__export_classes = (
+    SceneToTHUGFiles,
+    SceneToTHUGModel,
+    SceneToTHUG2Files,
+    SceneToTHUG2Model,
+    THUGQuickExport,
+    THUGExportTools,
+)
+
+def register():
+    import bpy
+    for cls in __export_classes:
+        try:
+            bpy.utils.register_class(cls)
+        except Exception:
+            pass
+
+def unregister():
+    import bpy
+    for cls in reversed(__export_classes):
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
             

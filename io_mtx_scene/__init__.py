@@ -36,6 +36,7 @@ def register():
     ]
 
     for module_name in (
+        "export_shared",
         "import_thug1",
         "import_thug2",
         "import_thps2",

@@ -199,6 +199,43 @@ def _make_temp_obj(data):
     else:
         return bpy.data.objects.new("~THUG TEMPORARY OBJECT~", data)
 
+
+#----------------------------------------------------------------------------------
+def reset_custom_normals(mesh):
+    """Reset/clear custom split normals on a Mesh to ensure smooth shading.
+    Uses `clear_custom_split_normals()` when available, otherwise falls back
+    to recalculating normals and disabling auto-smooth.
+    """
+    try:
+        if mesh is None:
+            return
+        # Preferrable API when present
+        if hasattr(mesh, 'clear_custom_split_normals'):
+            try:
+                mesh.clear_custom_split_normals()
+                try:
+                    mesh.use_auto_smooth = False
+                except Exception:
+                    pass
+                return
+            except Exception:
+                pass
+
+        # Fallback: recalc normals and disable auto-smooth
+        try:
+            if hasattr(mesh, 'calc_normals'):
+                mesh.calc_normals()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(mesh, 'use_auto_smooth'):
+                mesh.use_auto_smooth = False
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[THUG] reset_custom_normals failed: {e}")
+
 #----------------------------------------------------------------------------------
 def get_sphere_from_bbox(bbox):
     bbox_min, bbox_max = bbox

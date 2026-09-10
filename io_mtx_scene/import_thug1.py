@@ -205,16 +205,40 @@ def read_sectors_ug1(reader, printer, num_sectors, context, operator=None, outpu
             p("    flags: {} ({})".format(mesh_flags, bin(mesh_flags)), None)
 
             mat_checksum = p("    material checksum: {}", hex(r.u32()))
+            mat_name = str(mat_checksum)
+
+            # 1) Try direct name lookup
+            mat = bpy.data.materials.get(mat_name)
+
+            # 2) Fallback: find material that recorded the same checksum property
+            if mat is None:
+                for m in bpy.data.materials:
+                    try:
+                        if str(m.get("thug_mat_name_checksum", "")) == mat_name:
+                            mat = m
+                            break
+                    except Exception:
+                        pass
+
+            # 3) If still not found, create it and ensure node setup (preserve TEX_IMAGE nodes)
+            if mat is None:
+                mat = bpy.data.materials.new(name=mat_name)
+                try:
+                    ensure_principled_material(mat)
+                except Exception:
+                    try:
+                        mat.use_nodes = True
+                    except Exception:
+                        pass
+
+            # 4) Guarantee object has a material slot referencing this material
             mat_index = None
             for existing_mat_index, mat_slot in enumerate(blender_object.material_slots):
-                if mat_slot.material.name == mat_checksum:
+                if mat_slot.material == mat:
                     mat_index = existing_mat_index
                     break
             if mat_index is None:
-                # bpy.ops.object.material_slot_add()
-                blender_object.data.materials.append(bpy.data.materials[mat_checksum])
-                new_mat_slot = blender_object.material_slots[-1]
-                # new_mat_slot.material = bpy.data.materials[mat_checksum]
+                blender_object.data.materials.append(mat)
                 mat_index = len(blender_object.material_slots) - 1
 
             num_lod_levels = p("    number of lod index levels: {}", r.u32())
@@ -261,22 +285,32 @@ def read_sectors_ug1(reader, printer, num_sectors, context, operator=None, outpu
                     print(err)
 
             if sec_flags & SECFLAGS_HAS_TEXCOORDS:
-                uv_sets = len(per_vert_data[new_vert].get("uvs", []))
-                for l in range(uv_sets):
-                    uv_layer = bm.loops.layers.uv.get(str(l)) or bm.loops.layers.uv.new(str(l))
+                # Collect per-vertex UV sets aligned with `this_mesh_verts` order
+                # for assignment after the BMesh is converted to a Mesh.
+                vert_uvs = [per_vert_data.get(bmv, {}).get("uvs", []) for bmv in this_mesh_verts]
+                uv_sets = max((len(uv) for uv in vert_uvs), default=0)
+
+                # Preserve vertex color assignment (BMesh color layers) if present.
+                if sec_flags & SECFLAGS_HAS_VERTEX_COLORS:
                     for face in bm.faces:
                         for loop in face.loops:
                             pvd = per_vert_data.get(loop.vert)
                             if not pvd: continue
-                            loop[uv_layer].uv = pvd["uvs"][l]
-                            if sec_flags & SECFLAGS_HAS_VERTEX_COLORS:
-                                cb, cg, cr, ca = pvd["color"]
-                                alpha_val = (ca / 128.0) if 'ca' in locals() else 1.0
-                                loop[color_layer] = (cr / 128.0, cg / 128.0, cb / 128.0, alpha_val)
-                                loop[alpha_layer] = (ca / 128.0, ca / 128.0, ca / 128.0, 1.0)
-                                
+                            cb, cg, cr, ca = pvd["color"]
+                            alpha_val = (ca / 128.0) if 'ca' in locals() else 1.0
+                            loop[color_layer] = (cr / 128.0, cg / 128.0, cb / 128.0, alpha_val)
+                            loop[alpha_layer] = (ca / 128.0, ca / 128.0, ca / 128.0, 1.0)
+            else:
+                vert_uvs = []
+                uv_sets = 0
         bm.verts.index_update()
         bm.to_mesh(blender_mesh)
+        # Clear any custom split normals so meshes import with smooth shading
+        try:
+            from .helpers import reset_custom_normals
+            reset_custom_normals(blender_mesh)
+        except Exception:
+            pass
         
         if vertex_weights:
             vgs = blender_object.vertex_groups
@@ -293,6 +327,10 @@ def read_sectors_ug1(reader, printer, num_sectors, context, operator=None, outpu
                     vert_group.add([vert.index], weight, "ADD")
                 print()
 
+        # Ensure smooth shading and regenerate/clear custom split normals so
+        # meshes import with smooth shading by default. If `vertex_normals`
+        # were provided and the operator explicitly requested importing
+        # custom normals (`operator.import_custom_normals`), preserve them.
         if blender_mesh.polygons:
             blender_mesh.polygons.foreach_set("use_smooth", [True] * len(blender_mesh.polygons))
 
@@ -308,26 +346,63 @@ def read_sectors_ug1(reader, printer, num_sectors, context, operator=None, outpu
         except Exception:
             pass
 
-        if hasattr(blender_mesh, "use_auto_smooth"):
-            blender_mesh.use_auto_smooth = True
-        else:
-            blender_mesh.shade_smooth()
+        # Recalculate vertex normals from geometry.
+        try:
+            if hasattr(blender_mesh, "calc_normals"):
+                blender_mesh.calc_normals()
+        except Exception:
+            pass
 
-        if hasattr(blender_mesh, "calc_normals_split"):
-            blender_mesh.calc_normals_split()
-
-        if vertex_normals:
-            vertex_normals = { vert.index: normal for vert, normal in vertex_normals.items() }
-            new_normals = []
-            for l in blender_mesh.loops:
-                if l.vertex_index in vertex_normals:
-                    new_normals.append(vertex_normals[l.vertex_index])
-                else:
-                    new_normals.append((0.0, 0.0, 1.0))
-            if len(new_normals) == len(blender_mesh.loops) and hasattr(blender_mesh, "normals_split_custom_set"):
-                blender_mesh.normals_split_custom_set(new_normals)
+        # If the importer provided explicit per-vertex normals and the user
+        # requested to keep them, apply those as split custom normals. Otherwise
+        # reset custom normals to the averaged vertex normals (equivalent to
+        # Blender's "Reset Custom Split Normals") so shading appears smooth.
+        try:
+            if vertex_normals and operator is not None and getattr(operator, 'import_custom_normals', False):
+                # Apply provided custom normals (per-loop array built earlier)
+                vertex_normals = { vert.index: normal for vert, normal in vertex_normals.items() }
+                new_normals = [ vertex_normals.get(l.vertex_index, (0.0, 0.0, 1.0)) for l in blender_mesh.loops ]
+                if len(new_normals) == len(blender_mesh.loops) and hasattr(blender_mesh, "normals_split_custom_set"):
+                    blender_mesh.normals_split_custom_set(new_normals)
+                    blender_mesh.use_auto_smooth = True
+            else:
+                # Reset custom normals: compute smooth per-vertex normals and
+                # assign them to loops so split normals are cleared.
+                vert_normals = [v.normal for v in blender_mesh.vertices]
+                new_normals = [ vert_normals[l.vertex_index] for l in blender_mesh.loops ]
+                if len(new_normals) == len(blender_mesh.loops) and hasattr(blender_mesh, "normals_split_custom_set"):
+                    blender_mesh.normals_split_custom_set(new_normals)
+                    # Disable auto-smooth so Blender uses standard vertex normals.
+                    try:
+                        blender_mesh.use_auto_smooth = False
+                    except Exception:
+                        pass
+        except Exception as norm_err:
+            print(f"[THUG] Normal handling failed: {norm_err}")
 
         blender_mesh.update()
+
+        # Assign UVs using Mesh.uv_layers (Blender 2.8+/5.2 API). We map per-vertex
+        # UVs to per-loop UV slots so the UVs follow the polygon loop ordering.
+        try:
+            if uv_sets:
+                for set_index in range(uv_sets):
+                    layer_name = f"UVMap_{set_index}" if set_index != 0 else "UVMap"
+                    uv_layer = blender_mesh.uv_layers.get(layer_name) or blender_mesh.uv_layers.new(name=layer_name)
+                    blender_mesh.uv_layers.active = uv_layer
+
+                    for poly in blender_mesh.polygons:
+                        for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
+                            vert_index = blender_mesh.loops[loop_index].vertex_index
+                            if vert_index < len(vert_uvs):
+                                uvs = vert_uvs[vert_index]
+                                if set_index < len(uvs):
+                                    u, v = uvs[set_index]
+                                    # If textures appear flipped vertically, flip v here:
+                                    # v = 1.0 - v
+                                    uv_layer.data[loop_index].uv = (u, v)
+        except Exception as uv_err:
+            print(f"[THUG] UV assignment failed: {uv_err}")
 
         if sec_flags & SECFLAGS_HAS_VERTEX_COLORS:
             color_attr_name = "THUG_COLOR"

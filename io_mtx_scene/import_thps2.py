@@ -328,12 +328,27 @@ def read_meshes_thps2(reader, printer, num_objects, directory, operator, psx_dat
                         mat_index = len(blender_mesh.materials) -1
                 
                     
-                if mat_index != None and mat_index >= 0 and hasattr(blender_mesh.materials[mat_index].texture_slots[0].texture, 'image'):
-                    tex_size_x = float(blender_mesh.materials[mat_index].texture_slots[0].texture.image.size[0])
-                    tex_size_y = float(blender_mesh.materials[mat_index].texture_slots[0].texture.image.size[1])
-                else:
-                    tex_size_x = 64.0
-                    tex_size_y = 64.0
+                tex_size_x = 64.0
+                tex_size_y = 64.0
+                if mat_index is not None and mat_index >= 0:
+                    try:
+                        mat = blender_mesh.materials[mat_index]
+                        # Prefer legacy texture_slots if present
+                        ts = getattr(mat, 'texture_slots', None)
+                        if ts:
+                            ts0 = ts[0]
+                            if ts0 and getattr(ts0, 'texture', None) and getattr(ts0.texture, 'image', None):
+                                tex_size_x = float(ts0.texture.image.size[0])
+                                tex_size_y = float(ts0.texture.image.size[1])
+                        # Fallback: check node-based materials for an Image Texture node
+                        if (tex_size_x == 64.0 or tex_size_y == 64.0) and getattr(mat, 'node_tree', None):
+                            for n in mat.node_tree.nodes:
+                                if n.type == 'TEX_IMAGE' and getattr(n, 'image', None):
+                                    tex_size_x = float(n.image.size[0])
+                                    tex_size_y = float(n.image.size[1])
+                                    break
+                    except Exception:
+                        pass
                     
                 #if tex_size_x >= 128.0:
                 #    tex_size_x *= 2.0
